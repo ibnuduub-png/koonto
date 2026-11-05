@@ -136,3 +136,41 @@ drop trigger if exists va_no_delete on public.docs;
 create trigger va_no_delete
   before update or delete on public.docs
   for each row execute function public.va_block_employee_delete();
+
+
+-- =====================================================================
+-- PART 4: edit limit for employees (max 3 edits per receipt/invoice)
+-- The app keeps the edit history inside each document (data->'elog').
+-- The server makes sure an employee can never erase that history
+-- and can never go beyond 3 recorded edits. Admins are not affected.
+-- =====================================================================
+create or replace function public.va_limit_edits()
+returns trigger language plpgsql set search_path = public as $$
+declare
+  o int; n int; c int;
+  ol jsonb; nl jsonb;
+begin
+  if auth.uid() is null or public.va_is_admin() then
+    return new;
+  end if;
+  ol := case when jsonb_typeof((old.data)::jsonb -> 'elog') = 'array' then (old.data)::jsonb -> 'elog' else '[]'::jsonb end;
+  nl := case when jsonb_typeof((new.data)::jsonb -> 'elog') = 'array' then (new.data)::jsonb -> 'elog' else '[]'::jsonb end;
+  o := jsonb_array_length(ol);
+  n := jsonb_array_length(nl);
+  if n < o then
+    raise exception 'The edit history cannot be removed';
+  end if;
+  select count(*) into c
+  from jsonb_array_elements(nl) e
+  where coalesce(e->>'m', '0') not in ('1', 'true');
+  if c > 3 then
+    raise exception 'This item was edited 3 times and is locked';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists va_edit_limit on public.docs;
+create trigger va_edit_limit
+  before update on public.docs
+  for each row execute function public.va_limit_edits();
